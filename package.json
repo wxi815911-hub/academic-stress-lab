@@ -1,1 +1,16 @@
-{"name":"academic-stress-lab","version":"1.0.0","private":true,"type":"module","scripts":{"build":"node scripts/check-deploy.mjs","test":"node --test scripts/proxy.test.mjs"},"engines":{"node":">=22"}}
+{
+  "name": "academic-stress-lab",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "node scripts/check-deploy.mjs",
+    "test": "node --test scripts/backend.test.mjs"
+  },
+  "engines": {
+    "node": ">=24"
+  },
+  "dependencies": {
+    "@netlify/blobs": "^11.1.1"
+  }
+}
