@@ -1,0 +1,13 @@
+services:
+  stress-lab:
+    build: .
+    restart: unless-stopped
+    environment:
+      PUBLIC_ORIGIN: ${PUBLIC_ORIGIN:?Set PUBLIC_ORIGIN to your public HTTPS address}
+      NODE_ENV: production
+    ports:
+      - "127.0.0.1:8080:8080"
+    volumes:
+      - classroom-data:/app/data
+volumes:
+  classroom-data:

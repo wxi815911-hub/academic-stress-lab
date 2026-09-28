@@ -1,0 +1,6 @@
+node_modules/
+.netlify/
+data/
+.env
+.env.*
+!.env.example
