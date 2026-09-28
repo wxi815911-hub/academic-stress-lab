@@ -1,8 +1,5 @@
 import { AsyncLocalStorage } from 'node:async_hooks';
 import { DatabaseSync } from 'node:sqlite';
-import { mkdtemp, writeFile, readFile, rm } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
-import { join } from 'node:path';
 import schema from './schema.mjs';
 const contexts = new AsyncLocalStorage();
 globalThis.__stressPortableDB = { prepare(sql) {
@@ -29,30 +26,54 @@ export function makeBackend(getStorage) {
   if(!handler) return error('Method not allowed.',405);
   try {
    const store=getStorage();
-   for(let attempt=0;attempt<40;attempt++) {
-    const snapshot=code?await store.getWithMetadata('room/'+code,{type:'arrayBuffer',consistency:'strong'}):null;
-    if(code&&!snapshot) return error('This room does not exist or has expired. Ask your presenter for the current code.',404);
-    const dir=await mkdtemp(join(tmpdir(),'stress-'));
-    let db;
-    try {
-     const path=join(dir,'room.sqlite');
-     if(snapshot) await writeFile(path,new Uint8Array(snapshot.data));
-     db=new DatabaseSync(path);
-     db.exec('PRAGMA foreign_keys=ON;');
-     if(!snapshot) db.exec(schema);
-     const ctx={db,dirty:false};
-     const retryRequest=new Request(request.url,{method:request.method,headers:request.headers,...(raw!==undefined?{body:raw}:{})});
-     const response=await contexts.run(ctx,()=>handler(retryRequest,{params:Promise.resolve({code})}));
-     if(!response.ok||!ctx.dirty) return response;
-     const result=code?{code}:await response.clone().json();
-     db.close(); db=null;
-     const bytes=await readFile(path);
-     const saved=await store.set('room/'+result.code,bytes,{...(snapshot?{onlyIfMatch:snapshot.etag}:{onlyIfNew:true})});
-     if(saved.modified) { response.headers.set('X-Classroom-Backend','netlify-native-v1'); return response; }
-    } finally { if(db)db.close(); await rm(dir,{recursive:true,force:true}); }
-    await new Promise(r=>setTimeout(r,Math.min(300,20*(attempt+1))+Math.random()*150));
-   }
-   return error('The classroom is busy. Please submit again.',409);
+   const tables=['sessions','participants','votes','posts'];
+   const primary={sessions:['code'],participants:['code','participant'],votes:['code','stage','participant'],posts:['id']};
+   const prefix=code?'records/'+code+'/':null;
+   const existing=prefix?await store.get(prefix+'session',{type:'json',consistency:'strong'}):null;
+   if(code&&(!existing||existing.deleted||existing.expires_at<Date.now())) return error('This room does not exist or has expired. Ask your presenter for the current code.',404);
+   const db=new DatabaseSync(':memory:');
+   try {
+    db.exec(schema); db.exec('PRAGMA foreign_keys=ON;');
+    const insert=(table,row)=> {const keys=Object.keys(row);db.prepare('INSERT INTO '+table+' ('+keys.join(',')+') VALUES ('+keys.map(()=>'?').join(',')+')').run(...keys.map(k=>row[k]));};
+    if(existing) {
+     insert('sessions',existing);
+     const listing=await store.list({prefix:prefix+'data/'});
+     const rows=await Promise.all(listing.blobs.map(async item=>({key:item.key,row:await store.get(item.key,{type:'json',consistency:'strong'})})));
+     for(const table of tables.slice(1)) for(const item of rows) if(item.row&&item.key.startsWith(prefix+'data/'+table+'/')) insert(table,item.row);
+    }
+    const keyOf=(table,row)=>primary[table].map(k=>row[k]).join('-');
+    const before=Object.fromEntries(tables.map(table=>[table,new Map(db.prepare('SELECT * FROM '+table).all().map(row=>[keyOf(table,row),JSON.stringify(row)]))]));
+    const ctx={db,dirty:false};
+    const retryRequest=new Request(request.url,{method:request.method,headers:request.headers,...(raw!==undefined?{body:raw}:{})});
+    const response=await contexts.run(ctx,()=>handler(retryRequest,{params:Promise.resolve({code})}));
+    if(!response.ok||!ctx.dirty) return response;
+    const result=code?{code}:await response.clone().json();
+    const root='records/'+result.code+'/';
+    const after=Object.fromEntries(tables.map(table=>[table,db.prepare('SELECT * FROM '+table).all()]));
+    if(!code) {
+     const saved=await store.setJSON(root+'session',after.sessions[0],{onlyIfNew:true});
+     if(!saved.modified)return error('Please create the classroom again.',409);
+    } else if(!after.sessions.length) {
+     await store.setJSON(root+'session',{deleted:true});
+     const listing=await store.list({prefix:root+'data/'});
+     await Promise.all(listing.blobs.map(item=>store.delete(item.key)));
+    } else {
+     // Each participant, vote and post has its own durable key. Concurrent
+     // students never overwrite a shared room snapshot or one another's rows.
+     const writes=[];
+     for(const table of tables) {
+      const remaining=new Set();
+      for(const row of after[table]) {
+       const key=keyOf(table,row);remaining.add(key);
+       if(before[table].get(key)!==JSON.stringify(row)) writes.push(store.setJSON(table==='sessions'?root+'session':root+'data/'+table+'/'+key,row));
+      }
+      if(table!=='sessions')for(const key of before[table].keys())if(!remaining.has(key))writes.push(store.delete(root+'data/'+table+'/'+key));
+     }
+     await Promise.all(writes);
+    }
+    response.headers.set('X-Classroom-Backend','netlify-native-v2');
+    return response;
+   } finally {db.close();}
   } catch(err) {
    console.error('Netlify classroom storage failed',err);
    return error('Classroom storage could not be reached. Please retry shortly.',503);

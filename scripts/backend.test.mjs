@@ -3,6 +3,10 @@ import assert from 'node:assert/strict';
 import {makeBackend} from '../netlify/backend.mjs';
 class Store {
  data=new Map(); n=0;
+ async get(key){const v=this.data.get(key);return v?JSON.parse(v.data):null;}
+ async setJSON(key,data,opts={}){if(opts.onlyIfNew&&this.data.has(key))return {modified:false};this.data.set(key,{data:JSON.stringify(data)});return {modified:true};}
+ async list({prefix}){return {blobs:[...this.data.keys()].filter(key=>key.startsWith(prefix)).map(key=>({key}))};}
+ async delete(key){this.data.delete(key);}
  async getWithMetadata(key){const v=this.data.get(key); return v?{data:Uint8Array.from(v.data).buffer,etag:v.etag}:null;}
  async set(key,data,opts){const old=this.data.get(key); if(opts.onlyIfNew&&old||opts.onlyIfMatch&&old?.etag!==opts.onlyIfMatch)return {modified:false}; const etag=String(++this.n);this.data.set(key,{data:Uint8Array.from(data),etag});return {modified:true,etag};}
 }
